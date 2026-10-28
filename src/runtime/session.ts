@@ -34,6 +34,11 @@ import {
   type DatabaseLease,
 } from "../service/database-lease.js";
 import { type Role, WorkflowStore } from "../workflow/index.js";
+import {
+  ModelBudget,
+  type ModelBudgetLimits,
+  type ModelBudgetSummary,
+} from "./budget.js";
 import { FeatureExecutionEnv } from "./feature-env.js";
 import { ManagedExecutionEnv } from "./managed-env.js";
 import { OperationJournal } from "./recovery.js";
@@ -47,6 +52,8 @@ export interface RuntimeOptions {
   models: Models;
   model: ModelRef;
   connectionIdentity: string;
+  /** Session-wide dispatch limits, shared by root and all workers. */
+  budget?: ModelBudgetLimits;
   /** Enables confined file tools and durable, isolated feature workers. */
   featureWorkspace?: boolean;
   /** Opens a feature runtime for persisted-state inspection without aborting workers. */
@@ -94,6 +101,7 @@ export class RuntimeSession {
     private readonly featureWorkspace: boolean,
     private readonly inspectOnly: boolean,
     private readonly workerEnvironments: Map<string, Set<ManagedExecutionEnv>>,
+    private readonly budget: ModelBudget,
   ) {}
 
   static async open(options: RuntimeOptions): Promise<RuntimeSession> {
@@ -105,6 +113,7 @@ export class RuntimeSession {
     const lease = await acquireDatabaseLease(options.dbPath);
     let harness: Harness | undefined;
     let journal: OperationJournal | undefined;
+    let budget: ModelBudget | undefined;
     const environments = new Set<ManagedExecutionEnv>();
     const workerEnvironments = new Map<string, Set<ManagedExecutionEnv>>();
     const environmentControl = { stopping: false };
@@ -116,13 +125,17 @@ export class RuntimeSession {
     );
     try {
       journal = new OperationJournal(`${lease.databasePath}.operations.sqlite`);
+      budget = new ModelBudget(
+        `${lease.databasePath}.budget.sqlite`,
+        options.budget,
+      );
       const operationJournal = journal;
       const registry = createRegistry();
       registry.install(CodingTools);
       harness = await Harness.open(
         storage,
         {
-          models: options.models,
+          models: budget.wrap(options.models),
           registry,
           settings: { retry: { enabled: false } },
           env: (target) => {
@@ -194,6 +207,7 @@ export class RuntimeSession {
         Boolean(options.featureWorkspace),
         Boolean(options.inspectOnly),
         workerEnvironments,
+        budget,
       );
       // Mark surviving feature tasks while Pi scheduling is still paused. A later submit
       // or abort enables the whole Harness; old unknown work must never run first.
@@ -209,6 +223,7 @@ export class RuntimeSession {
           [...environments].map((env) => env.cleanup(BACKGROUND_CONTEXT)),
         );
         journal?.close();
+        budget?.close();
         lease.release();
       }
       throw error;
@@ -265,6 +280,11 @@ export class RuntimeSession {
       } while (cursor);
       return counts;
     }, BACKGROUND_CONTEXT);
+  }
+
+  /** Persistent dispatch limits, including unknown calls across restarts. */
+  async budgetSummary(): Promise<ModelBudgetSummary | null> {
+    return this.budget.summary();
   }
 
   /** Persistent model token ledger, aggregated across the root and all workers. */
@@ -590,6 +610,7 @@ export class RuntimeSession {
       if (closed?.status === "rejected") throw closed.reason;
       this.journal.checkpoint();
       this.journal.close();
+      this.budget.close();
       this.lease.release();
     })().catch((error: unknown) => {
       // Retry local teardown, but never re-enable execution or release ownership.

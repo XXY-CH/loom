@@ -51,7 +51,7 @@ function cellWidth(grapheme: string): number {
     : 1;
 }
 
-function fitCells(value: string, width: number): string {
+export function fitCells(value: string, width: number): string {
   if (width <= 0) return "";
   const parts = [...segments.segment(clean(value))].map(
     ({ segment }) => segment,

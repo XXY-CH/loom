@@ -94,6 +94,12 @@ export class FeatureRunner {
 
   static async open(options: FeatureOptions): Promise<FeatureRunner> {
     validateFeatureSpec(options.spec);
+    if (
+      options.runtime.budget &&
+      (options.runtime.budget.maxCalls !== options.spec.budget?.maxCalls ||
+        options.runtime.budget.maxTokens !== options.spec.budget?.maxTokens)
+    )
+      throw new Error("Workflow budget must be declared in its spec");
     const workspace = await new WorkspaceManager().create({
       repositoryPath: options.spec.repositoryPath,
       runId: options.spec.runId,
@@ -155,6 +161,7 @@ export class FeatureRunner {
       runtime = await RuntimeSession.open({
         ...options.runtime,
         dbPath: databasePath,
+        ...(options.spec.budget ? { budget: options.spec.budget } : {}),
         cwd: workspace.path,
         featureWorkspace: true,
       });
@@ -298,6 +305,12 @@ export class FeatureRunner {
       if (snapshot.run.status === "completed") return snapshot.run;
       const step = snapshot.run.steps.find((item) => item.status === "pending");
       if (!step) throw new Error("Feature has no dispatchable step");
+      const implementationStep =
+        snapshot.run.template.kind === "debug" ? "fix" : "implement";
+      const verificationStep =
+        snapshot.run.template.kind === "debug"
+          ? "reproduce_again"
+          : "targeted_verify";
       const operationId = randomUUID();
       await this.store.update((state, run) => {
         replace(
@@ -315,10 +328,16 @@ export class FeatureRunner {
         let detail: Pick<Evidence, "kind"> & Record<string, unknown>;
         let rejectedReview: string[] | undefined;
         if (step.requirement === "command") {
+          const spec = snapshot.state.spec;
           const command =
-            step.id === "targeted_verify"
-              ? snapshot.state.spec.targeted
-              : snapshot.state.spec.regression;
+            step.id === "reproduce" || step.id === "reproduce_again"
+              ? spec.reproduce
+              : step.id === "hypothesis_test"
+                ? spec.hypothesis
+                : step.id === "targeted_verify"
+                  ? spec.targeted
+                  : spec.regression;
+          if (!command) throw new Error("Missing command for workflow step");
           const result = await collectCommand({
             workspace: this.workspace,
             command,
@@ -384,10 +403,16 @@ export class FeatureRunner {
               priorArtifacts: snapshot.state.artifacts.filter(
                 (artifact) =>
                   step.id !== "review" ||
-                  ["scout", "contract", "plan"].includes(artifact.stepId),
+                  [
+                    "scout",
+                    "contract",
+                    "plan",
+                    "symptom",
+                    "investigate",
+                  ].includes(artifact.stepId),
               ),
               reviewFindings:
-                step.id === "implement"
+                step.id === implementationStep
                   ? snapshot.state.artifacts
                       .filter((artifact) => artifact.stepId === "review")
                       .slice(-1)
@@ -399,7 +424,9 @@ export class FeatureRunner {
                       (evidence) =>
                         evidence.valid &&
                         evidence.kind === "command" &&
-                        evidence.stepId === "targeted_verify",
+                        (evidence.stepId === verificationStep ||
+                          (snapshot.run.template.kind === "debug" &&
+                            evidence.stepId === "regression")),
                     )
                   : undefined,
               verificationArtifacts:
@@ -409,19 +436,21 @@ export class FeatureRunner {
                         (evidence) =>
                           evidence.valid &&
                           evidence.kind === "command" &&
-                          evidence.stepId === "targeted_verify" &&
+                          (evidence.stepId === verificationStep ||
+                            (snapshot.run.template.kind === "debug" &&
+                              evidence.stepId === "regression")) &&
                           evidence.id === artifact.id,
                       ),
                     )
                   : undefined,
               verificationFailures:
-                step.id === "implement"
+                step.id === implementationStep
                   ? (() => {
                       const failed = snapshot.run.evidence.findLast(
                         (evidence) =>
                           evidence.kind === "command" &&
                           evidence.exitCode !== 0 &&
-                          (evidence.stepId === "targeted_verify" ||
+                          (evidence.stepId === verificationStep ||
                             evidence.stepId === "regression"),
                       );
                       if (!failed) return undefined;
@@ -462,7 +491,7 @@ export class FeatureRunner {
                 ? review.findings
                 : ["Review rejected"];
             const implementer = snapshot.run.evidence.findLast(
-              (e) => e.stepId === "implement" && e.kind === "artifact",
+              (e) => e.stepId === implementationStep && e.kind === "artifact",
             );
             if (implementer?.kind !== "artifact")
               throw new Error("Missing implementer identity");
@@ -489,7 +518,7 @@ export class FeatureRunner {
                 workspace: after,
               }),
             );
-          if (changed && step.id !== "implement") {
+          if (changed && step.id !== implementationStep) {
             state.blockedReason =
               "Workspace changed during a read-only or verification stage";
             state.operation = null;
@@ -534,24 +563,32 @@ export class FeatureRunner {
                 run,
                 transitionWorkflow(run, {
                   type: "reopen",
-                  stepId: "implement",
+                  stepId: implementationStep,
                 }),
               );
             }
             return;
           }
-          if (detail.kind === "command" && detail.exitCode !== 0) {
+          if (
+            detail.kind === "command" &&
+            (step.id === "reproduce"
+              ? detail.exitCode === 0
+              : detail.exitCode !== 0)
+          ) {
             replace(
               run,
               transitionWorkflow(run, {
                 type: "fail",
                 stepId: step.id,
-                reason: "Command failed; inspect collected exit code",
+                reason:
+                  step.id === "reproduce"
+                    ? "Original reproduction unexpectedly passed"
+                    : "Command failed; inspect collected exit code",
               }),
             );
             const repairable =
               !changed &&
-              (step.id === "targeted_verify" || step.id === "regression");
+              (step.id === verificationStep || step.id === "regression");
             if (
               repairable &&
               (state.verificationReworks ?? 0) < MAX_VERIFICATION_REWORKS
@@ -564,7 +601,7 @@ export class FeatureRunner {
                 run,
                 transitionWorkflow(run, {
                   type: "reopen",
-                  stepId: "implement",
+                  stepId: implementationStep,
                 }),
               );
               // Reopening the repair root invalidates downstream evidence and
@@ -577,7 +614,10 @@ export class FeatureRunner {
               }
               state.blockedReason = null;
             } else {
-              state.blockedReason = "Command failed";
+              state.blockedReason =
+                step.id === "reproduce"
+                  ? "Original reproduction unexpectedly passed"
+                  : "Command failed";
             }
           } else
             replace(
@@ -618,7 +658,7 @@ export class FeatureRunner {
           : undefined;
         const safelyCancelledRead =
           operationStep?.requirement === "artifact" &&
-          operationStep.id !== "implement";
+          operationStep.role !== "implementer";
         if (safelyCancelledRead) state.operation = null;
         if (run.status !== "cancelled")
           replace(run, transitionWorkflow(run, { type: "cancel" }));

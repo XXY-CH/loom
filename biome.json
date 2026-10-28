@@ -1,6 +1,13 @@
 {
   "$schema": "https://biomejs.dev/schemas/2.5.15/schema.json",
-  "files": { "includes": ["src/**/*.ts", "tests/**/*.ts"] },
+  "files": {
+    "includes": [
+      "src/**/*.ts",
+      "tests/**/*.ts",
+      "web/**/*.ts",
+      "web/**/*.tsx"
+    ]
+  },
   "formatter": { "indentStyle": "space", "indentWidth": 2 },
   "javascript": { "formatter": { "quoteStyle": "double" } },
   "linter": { "enabled": true, "rules": { "recommended": true } },

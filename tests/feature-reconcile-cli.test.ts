@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { expect, test } from "vitest";
+import { connectionIdentity } from "../src/providers/identity.js";
 import { FeatureRunner } from "../src/workflow/feature.js";
 import { createFeatureFixture, featureModel } from "./feature-fixture.js";
 
@@ -28,7 +29,12 @@ test("feature CLI reconciles only matching reviewed intent without dispatching m
   if (!address || typeof address === "string")
     throw new Error("Expected TCP fixture");
   const endpoint = `http://127.0.0.1:${address.port}/v1`;
-  const connectionIdentity = createHash("sha256")
+  // The CLI raw-flag form derives profile.id (24hex) from the bare connection
+  // object; that id — not the connection identity — becomes the Pi provider
+  // session label `loom:<id>` persisted with the Run, so the providerId
+  // prediction keeps the legacy truncated derivation while the connection
+  // identity uses the shared full-hex function.
+  const profileId = createHash("sha256")
     .update(
       JSON.stringify({
         kind: "openai-compatible",
@@ -39,6 +45,12 @@ test("feature CLI reconciles only matching reviewed intent without dispatching m
     )
     .digest("hex")
     .slice(0, 24);
+  const identity = connectionIdentity({
+    kind: "openai-compatible",
+    protocol: "openai-completions",
+    modelId: "feature-fixture",
+    baseUrl: endpoint,
+  });
   const specPath = join(fixture.root, "spec.json");
   const common = [
     "feature",
@@ -78,7 +90,7 @@ test("feature CLI reconciles only matching reviewed intent without dispatching m
       model.runtime.model.provider,
     );
     if (!localProvider) throw new Error("Missing local fixture provider");
-    const providerId = `loom:${connectionIdentity}`;
+    const providerId = `loom:${profileId}`;
     model.runtime.models.setProvider({
       ...localProvider,
       id: providerId,
@@ -92,7 +104,7 @@ test("feature CLI reconciles only matching reviewed intent without dispatching m
       runtime: {
         ...model.runtime,
         dbPath: fixture.dbPath,
-        connectionIdentity,
+        connectionIdentity: identity,
         model: { ...model.runtime.model, provider: providerId },
       },
     });

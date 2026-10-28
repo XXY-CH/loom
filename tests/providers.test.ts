@@ -1,6 +1,7 @@
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { describe, expect, it } from "vitest";
+import { connectionIdentity } from "../src/providers/identity.js";
 import {
   createProviderModels,
   type OpenAIProtocol,
@@ -14,6 +15,71 @@ const custom: ProviderProfile = {
   modelId: "local/model",
   baseUrl: "http://127.0.0.1:11434/v1",
 };
+
+describe("connection identity derivation", () => {
+  // The two input shapes every caller produces: raw CLI flags assemble a bare
+  // connection object, while the service and the catalog resolve a full
+  // ProviderProfile (JSON round-tripped, so optional fields are absent).
+  const rawFlagForm = {
+    kind: "openai-compatible",
+    protocol: "openai-completions",
+    modelId: "local/model",
+    baseUrl: "http://127.0.0.1:11434/v1",
+  } as const;
+  const profileForm: ProviderProfile = {
+    id: "local",
+    kind: "openai-compatible",
+    protocol: "openai-completions",
+    modelId: "local/model",
+    baseUrl: "http://127.0.0.1:11434/v1",
+  };
+
+  it("derives one identity for the CLI flag form and the service profile form", () => {
+    expect(connectionIdentity(profileForm)).toBe(
+      connectionIdentity(rawFlagForm),
+    );
+  });
+
+  it("excludes the catalog id and emits the full SHA-256 hex", () => {
+    const renamed: ProviderProfile = { ...profileForm, id: "another-entry" };
+    expect(connectionIdentity(renamed)).toBe(connectionIdentity(profileForm));
+    expect(connectionIdentity(profileForm)).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it.each([
+    ["kind", "openai"],
+    ["protocol", "openai-responses"],
+    ["modelId", "other/model"],
+    ["baseUrl", "http://127.0.0.1:1/v1"],
+    ["keyEnv", "CHOSEN_KEY"],
+    ["contextWindow", 8192],
+    ["maxTokens", 512],
+  ] as const)("changes identity when %s differs", (field, value) => {
+    expect(connectionIdentity({ ...rawFlagForm, [field]: value })).not.toBe(
+      connectionIdentity(rawFlagForm),
+    );
+  });
+
+  it("treats undefined and absent optional fields symmetrically on both forms", () => {
+    expect(
+      connectionIdentity({
+        kind: "openai",
+        protocol: "openai-responses",
+        modelId: "gpt-4.1",
+        baseUrl: undefined,
+        keyEnv: undefined,
+        contextWindow: undefined,
+        maxTokens: undefined,
+      }),
+    ).toBe(
+      connectionIdentity({
+        kind: "openai",
+        protocol: "openai-responses",
+        modelId: "gpt-4.1",
+      }),
+    );
+  });
+});
 
 describe("provider configuration", () => {
   it("supports the built-in Anthropic Messages endpoint with isolated API-key auth", async () => {

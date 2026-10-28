@@ -131,7 +131,9 @@ export function featureModel(behavior: FixtureBehavior = {}) {
     behavior.onCall?.(prompt.step, context, afterTool);
     if (
       behavior.pauseStep === prompt.step ||
-      (behavior.pauseAfterWrite && prompt.step === "implement" && afterTool)
+      (behavior.pauseAfterWrite &&
+        (prompt.step === "implement" || prompt.step === "fix") &&
+        afterTool)
     ) {
       const abort = () => events.end(message([], "aborted"));
       if (options?.signal?.aborted) abort();
@@ -139,10 +141,13 @@ export function featureModel(behavior: FixtureBehavior = {}) {
       return events;
     }
     let answer: AssistantMessage;
-    if (prompt.step === "implement" && !afterTool) {
+    if ((prompt.step === "implement" || prompt.step === "fix") && !afterTool) {
       const implementationIndex =
-        calls.filter((call) => call.step === "implement" && !call.afterTool)
-          .length - 1;
+        calls.filter(
+          (call) =>
+            (call.step === "implement" || call.step === "fix") &&
+            !call.afterTool,
+        ).length - 1;
       answer = message(
         [
           {
@@ -186,7 +191,7 @@ export function featureModel(behavior: FixtureBehavior = {}) {
           : {
               step: prompt.step,
               report:
-                prompt.step === "implement"
+                prompt.step === "implement" || prompt.step === "fix"
                   ? "Changed sum.js using write tool; no command evidence claimed."
                   : "Inspected task and source context.",
             };

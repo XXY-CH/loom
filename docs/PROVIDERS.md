@@ -16,9 +16,11 @@
 
 ## Profile 与模型选择
 
-一个连接 profile 至少包含 `id`、`provider`、`protocol`、`baseUrl`、`authMethod`、`credentialRef`、model ID、能力与配置版本。一个 provider 可以有多条 profile，避免 pi-ai 的 provider ID 覆盖不同 endpoint/账号；映射方式在 Spike 验证。
+当前 JSON profile 包含 `id`、`kind`、`protocol`、`modelId`，可选 `baseUrl`、`keyEnv`、`contextWindow` 和 `maxTokens`。CLI 通过 `--profile PATH` 加载这些非敏感字段；文件拒绝额外凭据字段，API key 从 `keyEnv` 指向的进程环境或内置 provider 的默认环境变量读取。格式与用法见[开发指南](DEVELOPMENT.md#可复用连接-profile)。一个 provider 可以有多条 profile，避免 pi-ai 的 provider ID 覆盖不同 endpoint/账号。本地持久连接 catalog 已接线：`connections list/add/edit/remove` 管理，`--profile-id ID` 显式选择，owner-only 原子存储于 `~/.loom/connections.json`（可用 `--catalog DIR` 覆盖目录）。
 
-每次阶段执行固定 profile 版本和模型。全局默认、项目默认、Run 覆盖按此顺序覆盖；按角色指定模型必须显式配置。遇到额度或错误不静默切账号、endpoint 或计费方式。变更连接只影响新调用，已有调用结果保留原始归属。
+catalog 的服务侧访问是有意分层的边界（原「服务侧绝不写入」按预算核对先例做显式论证的边界修订）：读取侧自始走 `ConnectionCatalog.listReadOnly()` 只读加载路径，结构性不含 mkdir（目录缺失抛 `STORAGE_INVALID`「does not exist」结构化错误，不递归重建），条目由 `parseProviderProfile` 构造性保证非敏感（凭据只以 `keyEnv` 名出现），经 token 门禁的 `GET /connections` 暴露给浏览器工作台 start 表单作预填选择器——该读路径的无 mkdir 保证零回退。写入侧在同一 `--catalog DIR` opt-in 下提供 `connections-add`/`connections-update`/`connections-remove` 三个写方法（HTTP 形态 `POST /connections`、`PUT /connections/:id` 与 `DELETE /connections/:id`），修订理由：写路径与 CLI 子命令完全同一（`ConnectionCatalog.add/update/remove`——owner-only mkdir、跨实例锁、原子写、幂等 add、显式 update、add 的同 id 变更拒绝），构造性非敏感保证同一（明文凭据与未知字段拒绝入库），门禁不弱于任何动作端点（loopback + bearer token，同机同用户前提；先例为 `reconcile-budget` 服务写 `<db>.budget.sqlite`）。写入按需创建 owner-only 目录即 CLI `connections add` 的既有行为，与读路径的结构性无 mkdir 是有意的读写分叉，已记录于[本地服务指南](LOCAL_SERVICE.md)。工作台 start 表单在探测到启用的 catalog 时提供增删与更新入口（删除带显式确认一步；未启用时管理 UI 不出现）；edit 已落地为显式更新写路径——对同 id 条目替换字段（未知 id 报 `UNKNOWN_CONNECTION`、不做 upsert；canonical 相同为幂等 `unchanged` 且零写盘），CLI `connections edit`、服务 `connections-update` 与工作台「Update selected connection」三入口共用，add 的 `CONNECTION_CONFLICT` 语义与文案零改动；服务 TUI 的 edit 键位留后续片，全局/项目默认自动选择仍未实现，M3「连接管理 UI」不含后两项。
+
+设计上每次阶段执行固定 profile 版本和模型，未来按全局默认、项目默认、Run 覆盖的顺序选择；按角色指定模型必须显式配置。遇到额度或错误不静默切账号、endpoint 或计费方式。当前 profile 文件与 catalog 条目均由调用方显式选择（`--profile PATH` 或 `--profile-id ID`），未知 ID 明确报错、不回退到默认连接；全局/项目默认自动选择层尚未提供。变更连接只影响新调用，已有调用结果保留原始归属。
 
 动态模型发现可用时以服务端为准，否则允许手填 ID 并标记未验证。连接检查分为配置检查、凭据检查、模型发现、一次真实文本/工具流，不能只用 HTTP 200 表示模型可用。
 

@@ -21,7 +21,11 @@ export type FeatureSpec = {
   repositoryPath: string;
   baseCommit: string;
   worktreePath: string;
-  targeted: string[];
+  workflow?: "feature" | "debug";
+  budget?: { maxCalls: number; maxTokens: number };
+  targeted?: string[];
+  reproduce?: string[];
+  hypothesis?: string[];
   regression: string[];
 };
 export type FeatureArtifact = {
@@ -66,7 +70,20 @@ export function validateFeatureSpec(value: FeatureSpec): void {
     ![value.repositoryPath, value.worktreePath, value.baseCommit].every(
       (item) => typeof item === "string" && item.length > 0,
     ) ||
-    ![value.targeted, value.regression].every(
+    (value.workflow !== undefined &&
+      value.workflow !== "feature" &&
+      value.workflow !== "debug") ||
+    (value.budget !== undefined &&
+      (!value.budget ||
+        ![value.budget.maxCalls, value.budget.maxTokens].every(
+          (limit) => Number.isSafeInteger(limit) && limit > 0,
+        ))) ||
+    ![
+      value.regression,
+      ...(value.workflow === "debug"
+        ? [value.reproduce, value.hypothesis]
+        : [value.targeted]),
+    ].every(
       (argv) =>
         Array.isArray(argv) &&
         argv.length > 0 &&
@@ -111,7 +128,7 @@ export class FeatureStore {
         id: spec.runId,
         goal: spec.goal,
         workspace: identity,
-        template: workflowTemplate("feature"),
+        template: workflowTemplate(spec.workflow ?? "feature"),
       });
       feature.state = {
         spec,
